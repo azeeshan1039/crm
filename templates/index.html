@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Outreach CRM</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="dot"></span> Outreach CRM <small>local CRM</small></div>
+    <nav class="tabs" id="tabs">
+      <button data-tab="today" class="active">Today</button>
+      <button data-tab="board">Board</button>
+      <button data-tab="table">Table</button>
+      <button data-tab="dashboard">Dashboard</button>
+      <button data-tab="gmail">Gmail</button>
+    </nav>
+    <div class="topstats" id="topstats"></div>
+  </header>
+
+  <main id="view"><div class="empty">Loading…</div></main>
+
+  <!-- Lead drawer -->
+  <div class="overlay" id="overlay"></div>
+  <aside class="drawer" id="drawer" aria-hidden="true">
+    <header>
+      <div class="h-main">
+        <h2 id="d-name">—</h2>
+        <div class="h-sub" id="d-sub"></div>
+      </div>
+      <button class="close" id="d-close" title="Close">&times;</button>
+    </header>
+    <div class="scroll" id="d-body"></div>
+    <footer id="d-footer"></footer>
+  </aside>
+
+  <div id="toasts"></div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
