@@ -675,6 +675,12 @@ gmail.register(app)
 if __name__ == "__main__":
     init_db()
     autopilot.recover_interrupted()
-    port = int(os.environ.get("CRM_PORT", 5050))
-    print(f"Outreach CRM API -> http://127.0.0.1:{port}  (UI: http://localhost:3100)")
-    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
+    # Render sets RENDER and PORT. A local run sets neither, so it stays on loopback.
+    if os.environ.get("RENDER"):
+        host = "0.0.0.0"
+        port = int(os.environ["PORT"])
+    else:
+        host = "127.0.0.1"
+        port = int(os.environ.get("CRM_PORT", 5050))
+    print(f"Outreach CRM API -> http://{host}:{port}  (UI: http://localhost:3100)")
+    app.run(host=host, port=port, debug=False, threaded=True)
