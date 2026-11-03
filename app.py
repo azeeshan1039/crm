@@ -744,5 +744,6 @@ if __name__ == "__main__":
     else:
         host = "127.0.0.1"
         port = int(os.environ.get("CRM_PORT", 5050))
-    print(f"Outreach CRM API -> http://{host}:{port}  (UI: http://localhost:3100)")
-    app.run(host=host, port=port, debug=False, threaded=True)
+    print(f"Outreach CRM API -> http://{host}:{port}  (UI: http://localhost:3100, MCP: /mcp)")
+    import mcp_server
+    mcp_server.serve(app, host, port)

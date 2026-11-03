@@ -19,9 +19,11 @@ Postgres database. SQLite is only the fallback when neither variable is set.
 ## MCP
 
 `mcp_server.py` exposes lead tools over stdio for Cursor. Project config is `.cursor/mcp.json`.
-Set `MCP_USER_EMAIL` in `crm/.env` when more than one user exists; that account owns new leads and
-is the only account that can edit them. The MCP process opens its own connection, so the API does
-not need a restart.
+The same tools are also served at `/mcp` on the API process (streamable HTTP), which is what a
+ChatGPT plugin connects to: `https://YOUR-APP.onrender.com/mcp`. Set `MCP_USER_EMAIL` in `crm/.env`
+when more than one user exists; `CRM_API_USER_EMAIL` is the fallback. That account owns new leads
+and is the only account that can edit them. `/mcp` does not use the bearer API key. The local
+stdio process opens its own connection, so the API does not need a restart for Cursor.
 
 ## Files
 
@@ -29,7 +31,7 @@ not need a restart.
 |---|---|
 | `core.py` | Schema, additive migrations, guard rails (`transition_stage`, `detect_links`), scoring, settings defaults |
 | `app.py` | Flask JSON API (leads, stages, queue, metrics, bulk finalize, settings) |
-| `mcp_server.py` | Local MCP tools (`list_leads`, `get_lead`, `create_lead`, `update_lead`, `set_stage`, `delete_lead`). Uses Neon when `DATABASE_URL` is set. |
+| `mcp_server.py` | MCP tools (`list_leads`, `get_lead`, `create_lead`, `update_lead`, `set_stage`, `delete_lead`). Stdio for Cursor, and `/mcp` on the API process for ChatGPT. Uses Neon when `DATABASE_URL` is set. |
 | `autopilot.py` | AI Autopilot: the prompt (`RULES`), result schema, Claude/Codex runners, stream parsers, validation |
 | `gmail.py` | Google OAuth (PKCE) + Gmail **drafts** only (`gmail.compose` scope; no send call) |
 | `seed.py` | Imports a CSV into `crm.db` (idempotent, keyed on `clutch_id`) |

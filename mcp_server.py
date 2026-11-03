@@ -1,9 +1,9 @@
-"""Local MCP server for Outreach CRM.
+"""MCP server for Outreach CRM.
 
-Cursor (or any other MCP client on this machine) can list, create, and edit
-leads through the same database the web app uses. When crm/.env sets
-DATABASE_URL or NEON_DATABASE_URL, that is Neon. Otherwise it is the local
-SQLite file crm.db.
+Cursor launches this file over stdio. The API process also serves the same
+tools at /mcp (streamable HTTP) for a ChatGPT plugin. Both use the same
+database as the web app. When crm/.env sets DATABASE_URL or
+NEON_DATABASE_URL, that is Neon. Otherwise it is the local SQLite file crm.db.
 
 Writes are attributed to a CRM user:
 
@@ -88,7 +88,7 @@ def _call(fn):
 
 
 def _resolve_user(db):
-    email = (os.environ.get("MCP_USER_EMAIL") or "").strip().lower()
+    email = (os.environ.get("MCP_USER_EMAIL") or os.environ.get("CRM_API_USER_EMAIL") or "").strip().lower()
     if email:
         user = db.execute(
             "SELECT id, name, email FROM users WHERE lower(email)=?",
@@ -98,7 +98,7 @@ def _resolve_user(db):
             return None, {
                 "error": (
                     f"No CRM user with email {email}. "
-                    "Register in the app, or set MCP_USER_EMAIL in crm/.env to an existing account."
+                    "Register in the app, or set MCP_USER_EMAIL or CRM_API_USER_EMAIL to an existing account."
                 )
             }
         return user, None
@@ -107,10 +107,10 @@ def _resolve_user(db):
         return users[0], None
     if not users:
         return None, {
-            "error": "No CRM users yet. Register in the app, then set MCP_USER_EMAIL in crm/.env if there is more than one account."
+            "error": "No CRM users yet. Register in the app, then set MCP_USER_EMAIL or CRM_API_USER_EMAIL if there is more than one account."
         }
     return None, {
-        "error": "More than one CRM user. Set MCP_USER_EMAIL in crm/.env to the account this MCP should act as."
+        "error": "More than one CRM user. Set MCP_USER_EMAIL or CRM_API_USER_EMAIL to the account this MCP should act as."
     }
 
 
@@ -343,6 +343,29 @@ def delete_lead(lead_id: int) -> str:
         return {"ok": True, "id": lead_id, "company_name": lead["company_name"]}
 
     return _json(_call(run))
+
+
+def build_asgi(flask_app, host="127.0.0.1"):
+    """Serve the Flask site and a streamable-HTTP MCP endpoint at /mcp on one port."""
+    from starlette.applications import Starlette
+    from starlette.middleware.wsgi import WSGIMiddleware
+    from starlette.routing import Mount
+
+    mcp_asgi = mcp.streamable_http_app(
+        streamable_http_path="/mcp",
+        json_response=True,
+        host=host,
+    )
+    return Starlette(
+        routes=[*mcp_asgi.routes, Mount("/", app=WSGIMiddleware(flask_app))],
+        lifespan=mcp_asgi.router.lifespan_context,
+    )
+
+
+def serve(flask_app, host, port):
+    import uvicorn
+
+    uvicorn.run(build_asgi(flask_app, host=host), host=host, port=port, log_level="info")
 
 
 if __name__ == "__main__":
