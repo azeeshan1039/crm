@@ -8,6 +8,7 @@ legacy UI still served at http://127.0.0.1:5050/).
 Everything stays on this machine. SQLite file: crm.db (created on first run).
 Seed your leads once with:  python seed.py
 """
+import hmac
 import os
 import datetime as dt
 from flask import Flask, request, jsonify, g, render_template, session
@@ -62,6 +63,9 @@ def users_exist(db):
 
 
 def current_user(db):
+    api_user = getattr(g, "api_user", None)
+    if api_user is not None:
+        return api_user
     uid = session.get("user_id")
     if not uid:
         return None
@@ -69,7 +73,55 @@ def current_user(db):
 
 
 def current_user_id():
+    api_user = getattr(g, "api_user", None)
+    if api_user is not None:
+        return api_user["id"]
     return session.get("user_id")
+
+
+def _bearer_token():
+    header = request.headers.get("Authorization") or ""
+    scheme, _, token = header.partition(" ")
+    if scheme.lower() != "bearer":
+        return ""
+    return token.strip()
+
+
+def _api_key_matches(presented):
+    expected = (os.environ.get("CRM_API_KEY") or "").strip()
+    if not expected or not presented:
+        return False
+    return hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
+
+
+def _lead_write_for_api_key():
+    """The API key may create, update, or delete one lead. Other routes stay on the session."""
+    path = request.path.rstrip("/")
+    if request.method == "POST" and path == "/api/leads":
+        return True
+    if request.method in ("PATCH", "DELETE") and path.startswith("/api/leads/"):
+        return path[len("/api/leads/"):].isdigit()
+    return False
+
+
+def _api_key_user(db):
+    email = (os.environ.get("CRM_API_USER_EMAIL") or "").strip().lower()
+    if not email:
+        return None, {
+            "error": "CRM_API_USER_EMAIL is not set. Set it to the CRM account that should own API-key leads."
+        }
+    user = db.execute(
+        "SELECT id, name, email FROM users WHERE lower(email)=?",
+        (email,),
+    ).fetchone()
+    if not user:
+        return None, {
+            "error": (
+                f"No CRM user with email {email}. "
+                "Register that account in the app, or set CRM_API_USER_EMAIL to an existing account."
+            )
+        }
+    return user, None
 
 
 def require_lead_owner(db, lead_id):
@@ -91,6 +143,16 @@ def require_auth():
     if request.path == "/api/google/callback":
         return None
     db = get_db()
+    token = _bearer_token()
+    if token and _lead_write_for_api_key():
+        if not _api_key_matches(token):
+            return jsonify({"error": "invalid api key"}), 401
+        user, error = _api_key_user(db)
+        if error:
+            return jsonify(error), 401
+        g.api_user = user
+        g.user = user
+        return None
     user = current_user(db)
     if not user:
         return jsonify({"error": "login required"}), 401
