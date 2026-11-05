@@ -33,10 +33,12 @@ from core import (
     EDITABLE_FIELDS,
     STAGE_LABELS,
     apply_lead_updates,
+    attach_assignees,
     connect,
     create_lead as insert_lead,
     init_db,
     lead_to_dict,
+    resolve_assignee,
     transition_stage,
 )
 
@@ -48,12 +50,14 @@ mcp = MCPServer(
     title="Outreach CRM",
     instructions=(
         "Tools for the Outreach CRM database used by the web app. "
-        "Creating a lead puts it in To research. Updating a lead changes "
-        "profile, contact, draft, score, and campaign fields. "
+        "Creating a lead puts it in To research and requires assignee_email, "
+        "the email of an existing CRM user who will manage the lead. "
+        "Leads created through these tools can be edited or deleted by any CRM user. "
+        "Leads created in the app can be changed only by their owner. "
+        "Updating a lead changes profile, contact, draft, score, campaign, and assignee. "
         "Moving a lead uses the same stage rules as the app: Finalized needs "
         "a link-free subject and message body, Contacted needs confirm_sent, "
-        "and Do not contact needs suppression_reason. "
-        "Only the lead owner can change or delete a lead."
+        "and Do not contact needs suppression_reason."
     ),
 )
 
@@ -145,6 +149,9 @@ def _summary(row):
         "stage": lead.get("stage"),
         "stage_label": lead.get("stage_label"),
         "campaign": lead.get("campaign"),
+        "assignee_user_id": lead.get("assignee_user_id"),
+        "assignee_name": lead.get("assignee_name"),
+        "assignee_email": lead.get("assignee_email"),
         "source_type": lead.get("source_type"),
         "review_count": lead.get("review_count"),
         "contact_email": lead.get("contact_email"),
@@ -195,7 +202,9 @@ def list_leads(q: str = "", stage: str = "", campaign: str = "", limit: int = 25
             "SELECT * FROM leads" + where_sql + " ORDER BY updated_at DESC LIMIT ? OFFSET ?",
             params + [capped, start],
         ).fetchall()
-        return {"leads": [_summary(r) for r in rows], "total": total, "limit": capped, "offset": start}
+        leads = [_summary(r) for r in rows]
+        attach_assignees(db, leads)
+        return {"leads": leads, "total": total, "limit": capped, "offset": start}
 
     return _json(_call(run))
 
@@ -211,6 +220,7 @@ def get_lead(lead_id: int) -> str:
         if not row:
             return {"error": "not found", "id": lead_id}
         lead = lead_to_dict(row)
+        attach_assignees(db, [lead])
         lead["events"] = [
             dict(e)
             for e in db.execute(
@@ -233,6 +243,7 @@ def get_lead(lead_id: int) -> str:
 )
 def create_lead(
     company_name: str,
+    assignee_email: str,
     website: str = "",
     geography: str = "",
     source_type: str = "mcp",
@@ -241,11 +252,12 @@ def create_lead(
     review_count: int = 0,
     force: bool = False,
 ) -> str:
-    """Add a lead in To research. A matching website or company name is rejected unless force is true. source_type defaults to mcp."""
+    """Add a lead in To research. assignee_email is required and must be an existing CRM user; that person manages the lead. Leads created here can be edited or deleted by any CRM user. A matching website or company name is rejected unless force is true."""
 
     def run(db, user):
         payload, code = insert_lead(db, {
             "company_name": company_name,
+            "assignee_email": assignee_email,
             "website": website,
             "geography": geography,
             "source_type": source_type,
@@ -253,7 +265,7 @@ def create_lead(
             "campaign": campaign,
             "review_count": review_count,
             "force": force,
-        }, user_id=user["id"])
+        }, user_id=user["id"], shared=True)
         return _commit(db, payload, code)
 
     return _json(_call(run))
@@ -261,8 +273,10 @@ def create_lead(
 
 @mcp.tool(
     description=(
-        "Change fields on a lead the acting user owns. "
+        "Change fields on a lead. Leads created through this server can be changed by any CRM user. "
+        "Leads created in the app can be changed only by their owner. "
         "fields is an object of column names to new values. "
+        "Pass assignee_email to change who manages the lead. "
         "Stage is not a field here; use set_stage. Editable fields: " + _EDITABLE
     ),
     annotations=ToolAnnotations(title="Update lead", read_only_hint=False, destructive_hint=True, open_world_hint=False),
@@ -275,6 +289,12 @@ def update_lead(lead_id: int, fields: dict) -> str:
         if error:
             return error
         incoming = _fields(fields)
+        if incoming.get("assignee_email"):
+            assignee_id, assignee_error = resolve_assignee(db, incoming)
+            if assignee_error:
+                return assignee_error
+            incoming.pop("assignee_email", None)
+            incoming["assignee_user_id"] = assignee_id
         unknown = sorted(k for k in incoming if k not in EDITABLE_FIELDS)
         if unknown:
             return {"error": "unknown fields", "unknown": unknown, "editable": list(EDITABLE_FIELDS)}
@@ -286,7 +306,8 @@ def update_lead(lead_id: int, fields: dict) -> str:
 
 @mcp.tool(
     description=(
-        "Move a lead the acting user owns. Stages: " + _STAGES + ". "
+        "Move a lead. Leads created through this server can be moved by any CRM user. "
+        "Leads created in the app can be moved only by their owner. Stages: " + _STAGES + ". "
         "Contacted requires confirm_sent. Do not contact requires suppression_reason. "
         "Finalized requires a link-free subject and message body already saved on the lead."
     ),
@@ -329,7 +350,7 @@ def set_stage(
     annotations=ToolAnnotations(title="Delete lead", read_only_hint=False, destructive_hint=True, open_world_hint=False)
 )
 def delete_lead(lead_id: int) -> str:
-    """Permanently delete a lead the acting user owns, including its events and autopilot rows."""
+    """Permanently delete a lead, including its events and autopilot rows. Leads created through this server can be deleted by any CRM user. Leads created in the app can be deleted only by their owner."""
 
     def run(db, user):
         lead, error = _owner_error(db, lead_id, user["id"])

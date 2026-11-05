@@ -20,7 +20,7 @@ from core import (  # noqa: F401  (re-exported for seed.py / older scripts)
     connect, init_db, now_iso, today, add_business_days, detect_links,
     compute_score, log_event, lead_to_dict, normalize_domain, normalize_name,
     get_setting, set_setting, all_settings, DEFAULT_SETTINGS,
-    create_lead, apply_lead_updates, transition_stage,
+    create_lead, apply_lead_updates, transition_stage, attach_assignees,
 )
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
@@ -374,6 +374,7 @@ def api_leads():
 
     total = db.execute("SELECT COUNT(*) n FROM leads" + where_sql, params).fetchone()["n"]
     rows = [lead_to_dict(r) for r in db.execute(sql, params + [limit, offset])]
+    attach_assignees(db, rows)
     return jsonify({"leads": rows, "count": len(rows), "total": total, "offset": offset})
 
 
@@ -384,6 +385,7 @@ def api_lead(lead_id):
     if not r:
         return jsonify({"error": "not found"}), 404
     lead = lead_to_dict(r)
+    attach_assignees(db, [lead])
     lead["events"] = [dict(e) for e in db.execute(
         "SELECT * FROM events WHERE lead_id=? ORDER BY ts DESC, id DESC", (lead_id,))]
     lead["ai_runs"] = [dict(x) for x in db.execute(
@@ -391,6 +393,13 @@ def api_lead(lead_id):
         "FROM ai_run_items i JOIN ai_runs r ON r.id=i.run_id WHERE i.lead_id=? ORDER BY i.id DESC LIMIT 10",
         (lead_id,))]
     return jsonify(lead)
+
+
+@app.get("/api/users")
+def api_users():
+    db = get_db()
+    rows = db.execute("SELECT id, name, email FROM users ORDER BY name, id").fetchall()
+    return jsonify({"users": [dict(r) for r in rows]})
 
 
 @app.post("/api/leads")

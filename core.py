@@ -81,6 +81,7 @@ EDITABLE_FIELDS = [
     "next_action", "follow_up_date", "reply_notes",
     "proposed_value", "payment_received", "suppression_reason", "campaign",
     "confidence", "priority_flag", "source_type", "source_url", "source_date",
+    "assignee_user_id",
 ] + SCORE_FIELDS
 
 # Extra fields only the AI worker writes.
@@ -169,11 +170,13 @@ CREATE TABLE IF NOT EXISTS leads (
     created_by_user_id INTEGER,
     owner_user_id INTEGER,
     updated_by_user_id INTEGER,
+    assignee_user_id INTEGER,
     created_at TEXT,
     updated_at TEXT,
     FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
     FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE SET NULL,
-    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (assignee_user_id) REFERENCES users(id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_leads_stage ON leads(stage);
@@ -344,6 +347,7 @@ CREATE TABLE IF NOT EXISTS leads (
     created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     updated_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    assignee_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     created_at TEXT,
     updated_at TEXT
 );
@@ -426,6 +430,7 @@ LEAD_MIGRATIONS = [
     ("created_by_user_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL"),
     ("owner_user_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL"),
     ("updated_by_user_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL"),
+    ("assignee_user_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL"),
 ]
 
 
@@ -513,6 +518,7 @@ def migrate(con):
                 con.execute(f"ALTER TABLE leads ADD COLUMN {col} {decl}")
         con.execute("CREATE INDEX IF NOT EXISTS idx_leads_ai_status ON leads(ai_status)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_leads_owner ON leads(owner_user_id)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_leads_assignee ON leads(assignee_user_id)")
         return
     have = {r[1] for r in con.execute("PRAGMA table_info(leads)")}
     for col, decl in LEAD_MIGRATIONS:
@@ -520,6 +526,7 @@ def migrate(con):
             con.execute(f"ALTER TABLE leads ADD COLUMN {col} {decl}")
     con.execute("CREATE INDEX IF NOT EXISTS idx_leads_ai_status ON leads(ai_status)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_leads_owner ON leads(owner_user_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_leads_assignee ON leads(assignee_user_id)")
 
 
 def init_db():
@@ -588,6 +595,47 @@ def log_event(db, lead_id, type_, detail):
         "INSERT INTO events (lead_id, ts, type, detail) VALUES (?,?,?,?)",
         (lead_id, now_iso(), type_, detail),
     )
+
+
+def resolve_assignee(db, data):
+    """Return (user_id, error). A new lead must name an existing CRM user."""
+    email = (data.get("assignee_email") or "").strip().lower()
+    raw_id = data.get("assignee_user_id")
+    if email:
+        user = db.execute(
+            "SELECT id, name, email FROM users WHERE lower(email)=?",
+            (email,),
+        ).fetchone()
+        if not user:
+            return None, {"error": f"No CRM user with email {email}."}
+        return user["id"], None
+    if raw_id in (None, ""):
+        return None, {"error": "assignee required", "need": "assignee_user_id or assignee_email"}
+    try:
+        user_id = int(raw_id)
+    except (TypeError, ValueError):
+        return None, {"error": "assignee_user_id must be a CRM user id"}
+    user = db.execute("SELECT id FROM users WHERE id=?", (user_id,)).fetchone()
+    if not user:
+        return None, {"error": f"No CRM user with id {user_id}."}
+    return user_id, None
+
+
+def attach_assignees(db, leads):
+    """Add assignee_name and assignee_email onto lead dicts."""
+    ids = sorted({lead.get("assignee_user_id") for lead in leads if lead.get("assignee_user_id")})
+    by_id = {}
+    if ids:
+        rows = db.execute(
+            f"SELECT id, name, email FROM users WHERE id IN ({','.join('?' * len(ids))})",
+            ids,
+        ).fetchall()
+        by_id = {row["id"]: row for row in rows}
+    for lead in leads:
+        user = by_id.get(lead.get("assignee_user_id"))
+        lead["assignee_name"] = user["name"] if user else None
+        lead["assignee_email"] = user["email"] if user else None
+    return leads
 
 
 def lead_to_dict(row):
@@ -670,15 +718,20 @@ def all_settings(db):
 # ---------------------------------------------------------------------------
 # Lead mutations (shared by the API, the MCP server, and the AI worker)
 # ---------------------------------------------------------------------------
-def create_lead(db, data, user_id=None):
+def create_lead(db, data, user_id=None, shared=False):
     """Insert a manually added lead. Returns (payload, http_status). Does not commit.
 
     Duplicate website domains and normalized company names are rejected unless
-    data['force'] is true. New leads start in To research.
+    data['force'] is true. New leads start in To research. assignee_user_id or
+    assignee_email is required. shared=True leaves owner_user_id empty so any
+    CRM user can edit or delete the lead (used by the MCP server).
     """
     name = (data.get("company_name") or "").strip()
     if not name:
         return {"error": "company_name required"}, 400
+    assignee_id, assignee_error = resolve_assignee(db, data)
+    if assignee_error:
+        return assignee_error, 400
     domain = normalize_domain(data.get("website", ""))
     norm_name = normalize_name(name)
     dup = None
@@ -699,22 +752,32 @@ def create_lead(db, data, user_id=None):
     cols = [
         "company_name", "normalized_name", "website", "normalized_domain",
         "geography", "source_type", "source_url", "campaign", "stage",
-        "created_by_user_id", "owner_user_id", "updated_by_user_id",
+        "created_by_user_id", "owner_user_id", "updated_by_user_id", "assignee_user_id",
         "created_at", "updated_at", "review_count",
     ]
+    owner_id = None if shared else user_id
     vals = [
         name, norm_name, data.get("website", "") or "", domain,
         data.get("geography", "") or "", source_type,
         data.get("source_url", "") or "", data.get("campaign", "") or "",
-        "to_research", user_id, user_id, user_id,
+        "to_research", user_id, owner_id, user_id, assignee_id,
         now_iso(), now_iso(), int(data.get("review_count") or 0),
     ]
     cur = db.execute(
         f"INSERT INTO leads ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
         vals,
     )
-    log_event(db, cur.lastrowid, "system", f"Lead created manually ({source_type}).")
-    return {"id": cur.lastrowid, "stage": "to_research"}, 200
+    assignee = db.execute("SELECT name, email FROM users WHERE id=?", (assignee_id,)).fetchone()
+    log_event(
+        db, cur.lastrowid, "system",
+        f"Lead created ({source_type}). Assignee: {assignee['name']} ({assignee['email']}).",
+    )
+    return {
+        "id": cur.lastrowid,
+        "stage": "to_research",
+        "assignee_user_id": assignee_id,
+        "owner_user_id": owner_id,
+    }, 200
 
 
 def apply_lead_updates(db, lead_id, data, actor="user", allowed=None, user_id=None):
@@ -726,8 +789,19 @@ def apply_lead_updates(db, lead_id, data, actor="user", allowed=None, user_id=No
         return {"error": "not found"}, 404
     allowed = allowed or EDITABLE_FIELDS
     updates = {k: v for k, v in data.items() if k in allowed}
+    if "assignee_email" in data and "assignee_user_id" not in updates:
+        updates["assignee_user_id"] = data.get("assignee_email")
+        data = {**data, "assignee_user_id": data.get("assignee_email")}
     if not updates:
         return {"error": "no editable fields"}, 400
+    if "assignee_user_id" in updates or data.get("assignee_email"):
+        assignee_id, assignee_error = resolve_assignee(db, {
+            "assignee_user_id": updates.get("assignee_user_id"),
+            "assignee_email": data.get("assignee_email"),
+        })
+        if assignee_error:
+            return assignee_error, 400
+        updates["assignee_user_id"] = assignee_id
 
     # keep normalized_domain / name in sync if website/name changed
     if "website" in updates:
