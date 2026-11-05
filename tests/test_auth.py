@@ -66,18 +66,19 @@ class AuthTests(unittest.TestCase):
 
     def test_lead_tracks_creator_owner_and_updater(self):
         user_id = self.register().get_json()["user"]["id"]
-        res = self.client.post("/api/leads", json={"company_name": "Acme Studio"})
+        res = self.client.post("/api/leads", json={"company_name": "Acme Studio", "assignee_user_id": user_id})
         self.assertEqual(res.status_code, 200)
         lead_id = res.get_json()["id"]
         con = core.connect()
         try:
             row = con.execute(
-                "SELECT created_by_user_id, owner_user_id, updated_by_user_id FROM leads WHERE id=?",
+                "SELECT created_by_user_id, owner_user_id, updated_by_user_id, assignee_user_id FROM leads WHERE id=?",
                 (lead_id,),
             ).fetchone()
             self.assertEqual(row["created_by_user_id"], user_id)
             self.assertEqual(row["owner_user_id"], user_id)
             self.assertEqual(row["updated_by_user_id"], user_id)
+            self.assertEqual(row["assignee_user_id"], user_id)
 
             patch = self.client.patch(f"/api/leads/{lead_id}", json={"geography": "Lisbon"})
             self.assertEqual(patch.status_code, 200)
@@ -86,9 +87,15 @@ class AuthTests(unittest.TestCase):
         finally:
             con.close()
 
-    def test_only_owner_can_edit_or_delete_owned_lead(self):
+    def test_create_lead_requires_an_assignee(self):
         self.register()
-        res = self.client.post("/api/leads", json={"company_name": "Owner Only"})
+        res = self.client.post("/api/leads", json={"company_name": "No One"})
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.get_json()["error"], "assignee required")
+
+    def test_only_owner_can_edit_or_delete_owned_lead(self):
+        owner = self.register().get_json()["user"]["id"]
+        res = self.client.post("/api/leads", json={"company_name": "Owner Only", "assignee_user_id": owner})
         lead_id = res.get_json()["id"]
 
         other = self.register_other()
@@ -133,17 +140,18 @@ class AuthTests(unittest.TestCase):
         api = crm.app.test_client()
         headers = {"Authorization": "Bearer test-key"}
 
-        created = api.post("/api/leads", json={"company_name": "From ChatGPT"}, headers=headers)
+        created = api.post("/api/leads", json={"company_name": "From ChatGPT", "assignee_user_id": sam_id}, headers=headers)
         self.assertEqual(created.status_code, 200)
         lead_id = created.get_json()["id"]
         con = core.connect()
         try:
             row = con.execute(
-                "SELECT created_by_user_id, owner_user_id FROM leads WHERE id=?",
+                "SELECT created_by_user_id, owner_user_id, assignee_user_id FROM leads WHERE id=?",
                 (lead_id,),
             ).fetchone()
             self.assertEqual(row["owner_user_id"], sam_id)
             self.assertEqual(row["created_by_user_id"], sam_id)
+            self.assertEqual(row["assignee_user_id"], sam_id)
         finally:
             con.close()
 
@@ -153,8 +161,8 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(deleted.status_code, 200)
 
     def test_api_key_cannot_edit_another_owners_lead(self):
-        self.register()
-        lead_id = self.client.post("/api/leads", json={"company_name": "Owner Only"}).get_json()["id"]
+        owner = self.register().get_json()["user"]["id"]
+        lead_id = self.client.post("/api/leads", json={"company_name": "Owner Only", "assignee_user_id": owner}).get_json()["id"]
         self.register_other()
         self._use_api_key()
         api = crm.app.test_client()

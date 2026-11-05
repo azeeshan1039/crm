@@ -49,6 +49,7 @@ class McpLeadTests(unittest.TestCase):
         self.add_user("Alex Example", "alex@example.com")
         created = json.loads(mcp_server.create_lead(
             "Acme Studio",
+            assignee_email="alex@example.com",
             website="https://acme.example",
             geography="Lisbon",
             campaign="chatgpt",
@@ -67,49 +68,62 @@ class McpLeadTests(unittest.TestCase):
         full = json.loads(mcp_server.get_lead(created["id"]))
         self.assertEqual(full["contact_email"], "hi@acme.example")
         self.assertEqual(full["normalized_domain"], "acme.example")
+        self.assertIsNone(full["owner_user_id"])
+        self.assertEqual(full["assignee_email"], "alex@example.com")
 
     def test_duplicate_website_is_rejected_until_forced(self):
         self.add_user("Alex Example", "alex@example.com")
-        first = json.loads(mcp_server.create_lead("Acme Studio", website="https://acme.example"))
-        dup = json.loads(mcp_server.create_lead("Acme Again", website="https://www.acme.example/about"))
+        first = json.loads(mcp_server.create_lead("Acme Studio", "alex@example.com", website="https://acme.example"))
+        dup = json.loads(mcp_server.create_lead("Acme Again", "alex@example.com", website="https://www.acme.example/about"))
         self.assertEqual(dup["error"], "duplicate")
         self.assertEqual(dup["existing"]["id"], first["id"])
-        forced = json.loads(mcp_server.create_lead("Acme Again", website="https://www.acme.example/about", force=True))
+        forced = json.loads(mcp_server.create_lead("Acme Again", "alex@example.com", website="https://www.acme.example/about", force=True))
         self.assertIn("id", forced)
         self.assertNotEqual(forced["id"], first["id"])
 
-    def test_multiple_users_require_an_email_and_honor_ownership(self):
-        owner = self.add_user("Alex Example", "alex@example.com")
-        self.add_user("Sam Owner", "sam@example.com")
-        missing = json.loads(mcp_server.create_lead("Needs An Actor"))
-        self.assertIn("MCP_USER_EMAIL", missing["error"])
+    def test_mcp_leads_require_an_assignee_and_stay_open(self):
+        alex = self.add_user("Alex Example", "alex@example.com")
+        sam = self.add_user("Sam Owner", "sam@example.com")
+        missing_actor = json.loads(mcp_server.create_lead("Needs An Actor", assignee_email="alex@example.com"))
+        self.assertIn("MCP_USER_EMAIL", missing_actor["error"])
 
         os.environ["MCP_USER_EMAIL"] = "alex@example.com"
-        created = json.loads(mcp_server.create_lead("Owner Only"))
         db = core.connect()
         try:
-            row = db.execute("SELECT owner_user_id FROM leads WHERE id=?", (created["id"],)).fetchone()
-            self.assertEqual(row["owner_user_id"], owner)
+            payload, code = core.create_lead(db, {"company_name": "No Assignee"}, user_id=alex)
+            self.assertEqual(code, 400)
+            self.assertEqual(payload["error"], "assignee required")
+        finally:
+            db.close()
+
+        unknown = json.loads(mcp_server.create_lead("Missing Person", assignee_email="nobody@example.com"))
+        self.assertIn("No CRM user", unknown["error"])
+
+        created = json.loads(mcp_server.create_lead("Shared Lead", assignee_email="sam@example.com"))
+        db = core.connect()
+        try:
+            row = db.execute(
+                "SELECT owner_user_id, assignee_user_id, created_by_user_id FROM leads WHERE id=?",
+                (created["id"],),
+            ).fetchone()
+            self.assertIsNone(row["owner_user_id"])
+            self.assertEqual(row["assignee_user_id"], sam)
+            self.assertEqual(row["created_by_user_id"], alex)
         finally:
             db.close()
 
         os.environ["MCP_USER_EMAIL"] = "sam@example.com"
-        denied = json.loads(mcp_server.update_lead(created["id"], {"geography": "Porto"}))
-        self.assertEqual(denied["error"], "Only the lead owner can edit or delete this lead.")
-        deleted = json.loads(mcp_server.delete_lead(created["id"]))
-        self.assertEqual(deleted["error"], "Only the lead owner can edit or delete this lead.")
-
-        os.environ["MCP_USER_EMAIL"] = "alex@example.com"
+        updated = json.loads(mcp_server.update_lead(created["id"], {"geography": "Porto", "assignee_email": "alex@example.com"}))
+        self.assertTrue(updated["ok"])
         moved = json.loads(mcp_server.set_stage(created["id"], "archived"))
         self.assertTrue(moved["ok"])
-        self.assertEqual(moved["stage"], "archived")
         gone = json.loads(mcp_server.delete_lead(created["id"]))
         self.assertTrue(gone["ok"])
         self.assertEqual(json.loads(mcp_server.get_lead(created["id"]))["error"], "not found")
 
     def test_finalized_still_requires_a_link_free_draft(self):
         self.add_user("Alex Example", "alex@example.com")
-        created = json.loads(mcp_server.create_lead("Draft Me"))
+        created = json.loads(mcp_server.create_lead("Draft Me", assignee_email="alex@example.com"))
         blocked = json.loads(mcp_server.set_stage(created["id"], "finalized"))
         self.assertIn("subject and message body", blocked["error"])
 

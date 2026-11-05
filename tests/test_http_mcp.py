@@ -93,7 +93,11 @@ class HttpMcpTests(unittest.TestCase):
                 "method": "tools/call",
                 "params": {
                     "name": "create_lead",
-                    "arguments": {"company_name": "HTTP MCP Co", "website": "https://example.com"},
+                    "arguments": {
+                        "company_name": "HTTP MCP Co",
+                        "assignee_email": "sam@example.com",
+                        "website": "https://example.com",
+                    },
                 },
             })
             self.assertEqual(called.status_code, 200, called.text)
@@ -106,13 +110,14 @@ class HttpMcpTests(unittest.TestCase):
         db = core.connect()
         try:
             row = db.execute(
-                "SELECT company_name, stage, owner_user_id FROM leads WHERE id=?",
+                "SELECT company_name, stage, owner_user_id, assignee_user_id FROM leads WHERE id=?",
                 (created["id"],),
             ).fetchone()
             user = db.execute("SELECT id FROM users WHERE email=?", ("sam@example.com",)).fetchone()
             self.assertEqual(row["company_name"], "HTTP MCP Co")
             self.assertEqual(row["stage"], "to_research")
-            self.assertEqual(row["owner_user_id"], user["id"])
+            self.assertIsNone(row["owner_user_id"])
+            self.assertEqual(row["assignee_user_id"], user["id"])
         finally:
             db.close()
 
